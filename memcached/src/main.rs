@@ -1,22 +1,21 @@
 use once_cell::sync::Lazy;
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Error, Lines, Read, Write},
+    io::{BufRead, BufReader, Lines, Write},
     net::{TcpListener, TcpStream},
+    ops::Add,
     sync::Mutex,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug)]
 struct CacheEntry {
     data: String,
     flags: i32,
-    ttl: u32,
+    expire: u64,
 }
 
-static CACHE: Lazy<Mutex<HashMap<String, CacheEntry>>> = Lazy::new(|| {
-    let mut map = HashMap::new();
-    Mutex::new(map)
-});
+static CACHE: Lazy<Mutex<HashMap<String, CacheEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:11211").unwrap();
@@ -61,7 +60,7 @@ fn handle_command(lines: &mut Lines<BufReader<&mut TcpStream>>, command: String)
     }
 
     match parts[0] {
-        "set" => match lines.next() {
+        "set" | "SET" => match lines.next() {
             Some(result) => match result {
                 Ok(data) => handle_set(&parts[1..], data),
 
@@ -69,8 +68,8 @@ fn handle_command(lines: &mut Lines<BufReader<&mut TcpStream>>, command: String)
             },
             None => String::from("CLIENT_ERROR bad data chunk\r\n"),
         },
-        "get" => handle_get(&parts[1..]),
-        _ => String::new(),
+        "get" | "GET" => handle_get(&parts[1..]),
+        _ => String::from("ERROR invalid command"),
     }
 }
 
@@ -88,7 +87,21 @@ fn handle_set(args: &[&str], data: String) -> String {
         return String::from("CLIENT_ERROR bad data chunk\r\n");
     }
 
-    let entry = CacheEntry { data, flags, ttl };
+    let expire = if ttl > 0 {
+        SystemTime::now()
+            .add(Duration::from_secs(ttl.into()))
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    } else {
+        0
+    };
+
+    let entry = CacheEntry {
+        data,
+        flags,
+        expire,
+    };
 
     CACHE.lock().unwrap().insert(key, entry);
 
@@ -100,14 +113,21 @@ fn handle_set(args: &[&str], data: String) -> String {
 }
 
 fn handle_get(args: &[&str]) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let mut result = String::new();
     let cache = CACHE.lock().unwrap();
+
     for arg in args {
         match cache.get(*arg) {
             Some(entry) => {
-                result += &format!("VALUE {} {} {}\r\n", arg, entry.flags, entry.data.len());
-                result += &entry.data;
-                result += "\r\nEND\r\n"
+                if entry.expire == 0 || now <= entry.expire {
+                    result += &format!("VALUE {} {} {}\r\n", arg, entry.flags, entry.data.len());
+                    result += &entry.data;
+                    result += "\r\nEND\r\n"
+                }
             }
             None => {}
         }
