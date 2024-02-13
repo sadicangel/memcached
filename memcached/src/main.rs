@@ -5,6 +5,7 @@ use std::{
     net::{TcpListener, TcpStream},
     ops::Add,
     sync::Mutex,
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,7 +23,7 @@ fn main() {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(s) => handle_connection(s),
+            Ok(s) => _ = thread::spawn(|| handle_connection(s)),
             Err(e) => println!("Connection failed: {e}\r\n"),
         };
     }
